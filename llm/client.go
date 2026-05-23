@@ -1,7 +1,9 @@
 package llm
 
 import (
+	"context"
 	"rag-course/config"
+	"strings"
 
 	"github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
@@ -30,4 +32,58 @@ func New(cfg config.Config) *Client {
 	}
 
 	return &Client{cfg: cfg, sdk: openai.NewClient(opts...)}
+}
+
+func (c *Client) ChatStream(ctx context.Context, messages []Message, onDelta func(string)) (Message, error) {
+	stream := c.sdk.Chat.Completions.NewStreaming(ctx, openai.ChatCompletionNewParams{
+		Model:    c.cfg.Model,
+		Messages: toSDKMessages(messages),
+	})
+	defer stream.Close()
+
+	var content strings.Builder
+	role := "assistant"
+
+	for stream.Next() {
+		chunk := stream.Current()
+		if len(chunk.Choices) == 0 {
+			continue
+		}
+
+		delta := chunk.Choices[0].Delta
+		if delta.Role != "" {
+			// The API populates the role explicitly on the initial stream chunk to optimize bandwidth.
+			role = string(delta.Role)
+		}
+
+		if delta.Content != "" {
+			// Only process chunks that contain actual text content.
+			content.WriteString(delta.Content)
+			if onDelta != nil {
+				onDelta(delta.Content)
+			}
+		}
+	}
+
+	if err := stream.Err(); err != nil {
+		return Message{}, err
+	}
+
+	return Message{Role: role, Content: content.String()}, nil
+}
+
+func toSDKMessages(messages []Message) []openai.ChatCompletionMessageParamUnion {
+	out := make([]openai.ChatCompletionMessageParamUnion, 0, len(messages))
+	for _, m := range messages {
+		switch m.Role {
+		case "system":
+			out = append(out, openai.SystemMessage(m.Content))
+		case "assistant":
+			out = append(out, openai.AssistantMessage(m.Content))
+		default:
+			out = append(out, openai.UserMessage(m.Content))
+		}
+	}
+
+	return out
 }
