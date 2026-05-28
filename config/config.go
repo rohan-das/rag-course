@@ -8,9 +8,24 @@ import (
 
 // Config holds the configuration settings for the LLM client.
 type Config struct {
-	BaseURL          string // BaseURL is the endpoint for the OpenAI-compatible API server.
-	APIKey           string // APIKey is the authentication token; may be a placeholder for local providers.
-	Model            string // Model specifies the identifier of the LLM to be used.
+	// BaseURL points at any OpenAI-compatible chat-completions
+	// server: api.openai.com, a local Ollama at :11434/v1, LM
+	// Studio, Groq, Together, vLLM, and so on. The wire protocol is
+	// the same; only the URL and model name change.
+	BaseURL string
+
+	// APIKey is sent as `Authorization: Bearer <key>` when non-empty.
+	// Local servers usually accept any value (or none); hosted
+	// providers require their own key.
+	APIKey string
+
+	// Model is the chat-completions model identifier. Defaults to
+	// gpt-4o-mini so a fresh OpenAI key works with no further setup.
+	Model string
+
+	// SystemPromptFile is the path to a text/markdown file whose
+	// contents become the conversation's system message. A missing
+	// file is silently treated as "no system prompt".
 	SystemPromptFile string
 }
 
