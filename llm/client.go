@@ -45,12 +45,18 @@ func (c *Client) ChatStream(ctx context.Context, messages []Message, onDelta fun
 	role := "assistant"
 
 	for stream.Next() {
+		// A chunk represents a single, complete data packet received from the API stream at a specific moment in time.
 		chunk := stream.Current()
 		if len(chunk.Choices) == 0 {
+			// The Choices field is an array (or slice) inside the chunk.
+			// OpenAI allows you to request multiple alternative responses simultaneously (by setting the n parameter in the API request).
+			// Each item in this array is one of those alternative responses.
 			continue
 		}
 
 		delta := chunk.Choices[0].Delta
+		// In a standard, non-streaming API call, this field is called Message and contains the entire response. 
+		// However, in a streaming API call, it is called a Delta because it represents only the change or difference from the previous chunk.
 		if delta.Role != "" {
 			// The API populates the role explicitly on the initial stream chunk to optimize bandwidth.
 			role = string(delta.Role)
