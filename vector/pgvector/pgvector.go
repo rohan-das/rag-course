@@ -245,3 +245,33 @@ func (s *Store) Query(ctx context.Context, embedding []float32, topK int) ([]vec
 
 	return results, rows.Err()
 }
+
+// Delete removes documents by ID. Missing IDs are not an error — the
+// DELETE simply matches zero rows for them.
+func (s *Store) Delete(ctx context.Context, ids []string) error {
+	if len(ids) == 0 {
+		return nil
+	}
+
+	_, err := s.pool.Exec(ctx, `delete from documents where id = ANY($1)`, ids)
+	return err
+}
+
+// DeleteBySource removes every row whose "source" metadata key
+// matches source. The JSONB ->> operator compares as text, which is
+// what we want — sources are filenames, not nested structures.
+func (s *Store) DeleteBySource(ctx context.Context, source string) error {
+	if source == "" {
+		return nil
+	}
+
+	_, err := s.pool.Exec(ctx, `delete from documents where metadata->>'source' = $1`, source)
+	return err
+}
+
+// Close releases the connection pool. Safe to call once; subsequent
+// operations on the Store will fail.
+func (s *Store) Close() error {
+	s.pool.Close()
+	return nil
+}
