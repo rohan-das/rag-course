@@ -45,6 +45,17 @@ type Config struct {
 	//   text-embedding-3-large  → 3072
 	//   nomic-embed-text         → 768
 	EmbeddingDim int
+
+	// embedder endpoint config. EmbeddingBaseURL and
+	// EmbeddingAPIKey let the embedder talk to a different OpenAI-
+	// compatible endpoint than the chat client. The motivating case:
+	// a hosted chat model (Ollama Cloud, OpenAI, Groq, ...) plus a
+	// local embedder (Ollama, LM Studio, ...) — some hosted providers
+	// do not expose embedding models. When EmbeddingBaseURL is empty,
+	// the embedder reuses BaseURL/APIKey, preserving "one server for
+	// everything" for the simple case.
+	EmbeddingBaseURL string
+	EmbeddingAPIKey  string
 }
 
 // Load initializes the Config struct by reading environment variables.
@@ -59,6 +70,8 @@ func Load() Config {
 		SystemPromptFile: os.Getenv("SYSTEM_PROMPT_FILE"),
 		DatabaseURL:      os.Getenv("DATABASE_URL"),
 		EmbeddingDim:     atoiOr(os.Getenv("EMBEDDING_DIM"), 0),
+		EmbeddingBaseURL: os.Getenv("EMBEDDING_BASE_URL"),
+		EmbeddingAPIKey:  os.Getenv("EMBEDDING_API_KEY"),
 	}
 
 	if cfg.BaseURL == "" {
@@ -83,6 +96,20 @@ func Load() Config {
 	// you must drop the 'documents' table and recreate it with the new dimension size.
 	if cfg.EmbeddingDim == 0 {
 		cfg.EmbeddingDim = 768
+	}
+
+	// When the user hasn't pointed the embedder at a
+	// separate endpoint, reuse the chat endpoint and key — preserving
+	// "one OpenAI-compatible server for everything" for the simple
+	// case. When EMBEDDING_BASE_URL IS set we leave the API key alone:
+	// a different host means a different (or no) credential, and
+	// silently borrowing the chat key would send it to a server that
+	// didn't ask for it.
+	if cfg.EmbeddingBaseURL == "" {
+		cfg.EmbeddingBaseURL = cfg.BaseURL
+		if cfg.EmbeddingAPIKey == "" {
+			cfg.EmbeddingAPIKey = cfg.APIKey
+		}
 	}
 
 	return cfg
