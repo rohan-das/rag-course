@@ -1,5 +1,4 @@
-// Package chunk provides a simple text chunker for the ingest pipeline.
-package chunk
+package ingest
 
 import "strings"
 

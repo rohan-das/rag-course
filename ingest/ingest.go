@@ -21,7 +21,7 @@
 //     re-ingesting an edited file leaves no orphans behind.
 //  5. UPSERT — insert (or replace) the new chunks in the vector store
 //     with the embeddings attached.
-package chunk
+package ingest
 
 import (
 	"context"
