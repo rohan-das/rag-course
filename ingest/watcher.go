@@ -22,7 +22,7 @@ import (
 // by the operating system before we try to read and process it.
 const debounceDelay = 500 * time.Millisecond
 
-func Watcher(ctx context.Context, opts Options, embedder llm.Embedder, store vector.Store, logger *log.Logger) error {
+func Watch(ctx context.Context, opts Options, embedder llm.Embedder, store vector.Store, logger *log.Logger) error {
 	if filepath.Clean(opts.SourceDir) == filepath.Clean(opts.ProcessedDir) {
 		return errors.New("source and processed directories must differ")
 	}
