@@ -8,7 +8,7 @@ import (
 
 const contextPreamble = `Use the following excerpts from the document collection to answer the question.
 Cite sources by filename when you draw from them. If the excerpts do not address the question, say so
-before answer from general knowledge.`
+before answering from general knowledge.`
 
 const unknownSource = "(unknown source)"
 

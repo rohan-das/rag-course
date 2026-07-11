@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"rag-course/llm"
+	"rag-course/rag"
 	"strings"
 	"sync"
 	"time"
@@ -25,7 +26,7 @@ type Options struct {
 // line the user types is appended to a growing slice of llm.Messages
 // and sent to the model; the reply is printed and then appended to the
 // same history so subsequent turns retain context.
-func RunREPL(ctx context.Context, client *llm.Client, opts Options) error {
+func RunREPL(ctx context.Context, client *llm.Client, retriever *rag.Retriever, opts Options) error {
 	// bufio.NewScanner reads full lines until '\n' (unlike fmt.Scanln which breaks on spaces).
 	in := bufio.NewScanner(os.Stdin)
 
@@ -63,11 +64,38 @@ func RunREPL(ctx context.Context, client *llm.Client, opts Options) error {
 		history = append(history, llm.Message{Role: "user", Content: input})
 
 		spin := startSpinner("thinking")
-
 		// stopOnce ensures spin.Stop() is triggered exactly ONE time across the two potential paths below.
 		var stopOnce sync.Once
 
-		reply, err := client.ChatStream(ctx, history, func(s string) {
+		// Keep a separate copy of the current conversation that can be modified
+		// with additional context before sending it to the LLM.
+		//
+		// The original history remains unchanged because it represents the
+		// actual conversation between the user and assistant.
+		turn := history
+
+		// Retrieval is optional. When a retriever exists, it:
+		// 1. Rewrites the user question into a better search query if needed.
+		// 2. Converts the query into an embedding vector.
+		// 3. Searches the vector database.
+		// 4. Returns formatted document excerpts.
+		if retriever != nil {
+			contextText, retErr := retriever.Retrieve(ctx, history)
+			if retErr != nil {
+				fmt.Fprintln(os.Stderr, "retrieval err: ", retErr)
+			} else if contextText != "" {
+				// contextText is the formatted retrieval context returned by
+				// retriever.Retrieve(). The format of this value is defined in
+				// prompt.go by formatContext().
+				//
+				// prompt.go also includes an example output in the comments
+				// showing what the contextText value looks like before it is
+				// added to the user message sent to the LLM.
+				turn = withInlineContext(history, contextText)
+			}
+		}
+
+		reply, err := client.ChatStream(ctx, turn, func(s string) {
 			// CALL 1 (Visual Timing Path): Kills the spinner the exact millisecond the *first*
 			// chunk of text arrives from the LLM so the text prints on a clean terminal line.
 			stopOnce.Do(spin.Stop)
@@ -87,6 +115,47 @@ func RunREPL(ctx context.Context, client *llm.Client, opts Options) error {
 		}
 		history = append(history, reply)
 	}
+}
+
+// withInlineContext creates a copy of the conversation history and replaces the
+// latest user message in the copy by adding the retrieved document context
+// before the original user question.
+//
+// The original history is intentionally not modified. Retrieval context is only
+// needed for the current LLM request. Keeping it out of the permanent history
+// avoids sending the same document excerpts again in future conversation turns.
+//
+// If the latest message is not from the user, there is no user question
+// to attach the retrieved context to.
+func withInlineContext(history []llm.Message, contextText string) []llm.Message {
+	// Nothing to change if there is no conversation or no retrieved context.
+	if len(history) == 0 || contextText == "" {
+		return history
+	}
+
+	// Retrieved context should be added only to the latest user message.
+	// If the latest message is not from the user, there is no question to attach it to.
+	last := history[len(history)-1]
+	if last.Role != "user" {
+		return history
+	}
+
+	// Create a copy so the original history stays unchanged.
+	// This allows us to send a version with retrieval context without storing
+	// those excerpts permanently in the conversation.
+	out := make([]llm.Message, len(history))
+	copy(out, history)
+
+	// Replace the latest user message with:
+	// 1. The retrieved document excerpts.
+	// 2. A separator.
+	// 3. The original user question.
+	out[len(out)-1] = llm.Message{
+		Role:    "user",
+		Content: contextText + "\n\n--- Question ---\n\n" + last.Content,
+	}
+
+	return out
 }
 
 type spinner struct {
