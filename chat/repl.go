@@ -110,6 +110,9 @@ func RunREPL(ctx context.Context, client *llm.Client, retriever *rag.Retriever, 
 
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "error: ", err)
+			// Roll back the user message so a retry doesn't
+			// double-post it and so the failed turn doesn't pollute
+			// future context.
 			history = history[:len(history)-1]
 			continue
 		}

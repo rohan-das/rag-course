@@ -22,6 +22,10 @@ type Rewriter struct {
 	client *llm.Client
 }
 
+func NewRewriter(client *llm.Client) *Rewriter {
+	return &Rewriter{client: client}
+}
+
 // Rewrite converts the current conversational request into a standalone query
 // suitable for document retrieval.
 //
