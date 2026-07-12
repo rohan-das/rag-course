@@ -83,11 +83,11 @@ func processOne(ctx context.Context, path string, opts Options, embedder llm.Emb
 		return fmt.Errorf("read: %w", err)
 	}
 
-	_, err = processContent(ctx, filepath.Base(path), raw, opts, embedder, store)
+	_, err = ProcessContent(ctx, path, raw, opts, embedder, store)
 	return err
 }
 
-// processContent ingests an in-memory document under the
+// ProcessContent ingests an in-memory document under the
 // given source name and returns the number of chunks produced. The
 // source name is used as the chunk-id prefix and the "source" metadata
 // field; only its basename is significant.
@@ -100,7 +100,7 @@ func processOne(ctx context.Context, path string, opts Options, embedder llm.Emb
 // brief window where the file has zero chunks in the store; a
 // retrieval that lands in that window will simply return fewer hits.
 // For a course-pace pipeline this is invisible.
-func processContent(ctx context.Context, source string, content []byte, opts Options, embedder llm.Embedder, store vector.Store) (int, error) {
+func ProcessContent(ctx context.Context, source string, content []byte, opts Options, embedder llm.Embedder, store vector.Store) (int, error) {
 	if embedder == nil {
 		return 0, errors.New("embedder is required")
 	}
@@ -176,6 +176,10 @@ func processContent(ctx context.Context, source string, content []byte, opts Opt
 	}
 
 	return len(chunks), nil
+}
+
+func IsSupported(name string) bool {
+	return supportedFormat(name)
 }
 
 // supportedFormat reports whether path's extension is one
