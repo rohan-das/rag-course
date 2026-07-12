@@ -59,6 +59,10 @@ type Config struct {
 	EmbeddingModel   string
 	IngestDir        string
 	ProcessedDir     string
+
+	HTTPAddr    string
+	ImageDir    string
+	VisionModel string
 }
 
 // Load initializes the Config struct by reading environment variables.
@@ -80,6 +84,9 @@ func Load() Config {
 		EmbeddingModel:   os.Getenv("EMBEDDING_MODEL"),
 		IngestDir:        os.Getenv("INGEST_DIR"),
 		ProcessedDir:     os.Getenv("PROCESSED_DIR"),
+		HTTPAddr:         os.Getenv("HTTP_ADDR"),
+		ImageDir:         os.Getenv("IMAGES_DIR"),
+		VisionModel:      os.Getenv("VISION_MODEL"),
 	}
 
 	if cfg.BaseURL == "" {
@@ -128,6 +135,10 @@ func Load() Config {
 	}
 	if cfg.ProcessedDir == "" {
 		cfg.ProcessedDir = "./documents/processed"
+	}
+
+	if cfg.ImageDir == "" {
+		cfg.ImageDir = "./documents/images"
 	}
 
 	return cfg
