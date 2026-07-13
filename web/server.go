@@ -3,6 +3,7 @@ package web
 import (
 	"context"
 	"embed"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"html/template"
@@ -48,8 +49,119 @@ func (s *Server) Routes() http.Handler {
 	r := chi.NewRouter()
 	r.Use(middleware.Recoverer)
 	r.Get("/chat", s.handleChatPage)
+	r.Post("/api/chat/stream", s.handleChatStream)
 
 	return r
+}
+
+type chatRequest struct {
+	Messages []llm.Message `json:"messages"`
+}
+
+func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
+	// Streaming responses require the ResponseWriter to implement
+	// http.Flusher. Flush() forces any buffered data to be sent to
+	// the client immediately, allowing the client to receive partial
+	// responses (tokens/chunks) as they are generated.
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+
+	var req chatRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid json:"+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if len(req.Messages) == 0 {
+		http.Error(w, "messages must not be empty", http.StatusBadRequest)
+		return
+	}
+
+	if last := req.Messages[len(req.Messages)-1]; last.Role != "user" {
+		http.Error(w, "last message must be from user", http.StatusBadRequest)
+		return
+	}
+
+	history := req.Messages
+	if s.system != "" {
+		history = append([]llm.Message{{Role: "system", Content: s.system}}, history...)
+	}
+
+	turn := history
+	if s.retriever != nil {
+		ctxText, err := s.retriever.Retrieve(r.Context(), history)
+		if err != nil {
+			log.Printf("[web] retrieval error: %v", err)
+		} else {
+			turn = withInlineContext(history, ctxText)
+		}
+	}
+
+	// Configure the response as a Server-Sent Events (SSE) stream.
+	//
+	// Content-Type: text/event-stream
+	//   Indicates that the response will be an SSE stream.
+	//
+	// Cache-Control: no-cache
+	//   Prevents browsers and proxies from caching streamed events.
+	//
+	// Connection: keep-alive
+	//   Keeps the HTTP connection open so events can be sent
+	//   continuously instead of returning a single response.
+	//
+	// X-Accel-Buffering: no
+	//   Disables buffering in reverse proxies such as Nginx so that
+	//   each event reaches the client immediately.
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+
+	// Send the headers immediately so the client knows the stream
+	// has started before the first event is produced.
+	flusher.Flush()
+
+	send := func(event, data string) {
+		if event != "" {
+			fmt.Fprintf(w, "event: %s\n", event)
+		}
+		fmt.Fprintf(w, "data: %s\n\n", data)
+
+		// Flush each event immediately instead of waiting for the
+		// response buffer to fill up.
+		flusher.Flush()
+	}
+
+	_, err := s.client.ChatStream(r.Context(), turn, func(delta string) {
+		enc, _ := json.Marshal(delta)
+		send("delta", string(enc))
+	})
+	if err != nil {
+		enc, _ := json.Marshal(err.Error())
+		send("error", string(enc))
+		return
+	}
+	send("done", `""`)
+}
+
+func withInlineContext(history []llm.Message, contextText string) []llm.Message {
+	if len(history) == 0 || contextText == "" {
+		return history
+	}
+	last := history[len(history)-1]
+	if last.Role != "user" {
+		return history
+	}
+	out := make([]llm.Message, len(history))
+	copy(out, history)
+	out[len(out)-1] = llm.Message{
+		Role:    "user",
+		Content: contextText + "\n\n--- Question ---\n\n" + last.Content,
+	}
+	return out
 }
 
 func (s *Server) handleChatPage(w http.ResponseWriter, r *http.Request) {
