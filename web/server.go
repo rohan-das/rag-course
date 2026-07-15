@@ -7,10 +7,13 @@ import (
 	"errors"
 	"fmt"
 	"html/template"
+	"io"
 	"io/fs"
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
+	"rag-course/ingest"
 	"rag-course/llm"
 	"rag-course/rag"
 	"rag-course/vector"
@@ -23,6 +26,14 @@ import (
 
 //go:embed templates/*.gohtml
 var templatesFS embed.FS
+
+const maxUploadBytes = 10 << 20
+
+type uploadResponse struct {
+	Source string `json:"source"`
+	Bytes  int    `json:"bytes"`
+	Chunks int    `json:"chunks"`
+}
 
 type Options struct {
 	Addr             string
@@ -50,12 +61,80 @@ func (s *Server) Routes() http.Handler {
 	r.Use(middleware.Recoverer)
 	r.Get("/chat", s.handleChatPage)
 	r.Post("/api/chat/stream", s.handleChatStream)
+	r.Post("/api/upload", s.handleUpload)
 
 	return r
 }
 
 type chatRequest struct {
 	Messages []llm.Message `json:"messages"`
+}
+
+func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
+	if s.store == nil {
+		http.Error(w, "ingest is not configured (no vector store)", http.StatusServiceUnavailable)
+		return
+	}
+
+	// Wrap the request body with a size limit. Any reads beyond
+	// maxUploadBytes will fail, preventing excessively large uploads.
+	r.Body = http.MaxBytesReader(w, r.Body, maxUploadBytes)
+
+	// Parse the multipart/form-data request. Uploaded files larger than
+	// maxUploadBytes or malformed multipart bodies return an error.
+	if err := r.ParseMultipartForm(maxUploadBytes); err != nil {
+		http.Error(w, "upload too large or malformed: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// Retrieve the uploaded file from the multipart form field named "file".
+	// header contains metadata such as the original filename.
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		http.Error(w, "missing 'file' field: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	defer file.Close()
+
+	// Use only the base filename to avoid directory traversal issues
+	// (e.g., "/data/employee.txt" becomes "employee.txt").
+	name := filepath.Base(header.Filename)
+	if !ingest.IsSupported(name) {
+		http.Error(w, "unsupported format", http.StatusUnsupportedMediaType)
+		return
+	}
+
+	// Read the uploaded file into memory.
+	content, err := io.ReadAll(file)
+	if err != nil {
+		http.Error(w, "read upload: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// Process the document, generate embeddings, and store them.
+	chunks, err := ingest.ProcessContent(r.Context(), name, content, ingest.Options{}, s.embedder, s.store)
+	if err != nil {
+		log.Printf("[web] upload ingest failed for %q: %v", name, err)
+		http.Error(w, "ingest failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Archive the successfully processed file.
+	if s.processedDir != "" {
+		dest := filepath.Join(s.processedDir, name)
+		if err := os.MkdirAll(s.processedDir, 0o755); err != nil {
+			log.Printf("[web] mkdir %s: %v", s.processedDir, err)
+		} else if err := os.WriteFile(dest, content, 0o644); err != nil {
+			log.Printf("[web] archive %s: %v", dest, err)
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(uploadResponse{
+		Source: name,
+		Bytes:  len(content),
+		Chunks: chunks,
+	})
 }
 
 func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
