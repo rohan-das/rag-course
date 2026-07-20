@@ -63,7 +63,163 @@ func (s *Server) Routes() http.Handler {
 	r.Post("/api/chat/stream", s.handleChatStream)
 	r.Post("/api/upload", s.handleUpload)
 
+	if s.imagesDir != "" {
+		r.Post("/api/upload/image", s.handleUploadImage)
+
+		// This code tells your router:
+		// "If anyone requests a URL starting with '/images/', look inside './documents/images/' on our disk!"
+
+		// 1. THE FILE SYSTEM HELPER (Where are the files?)
+		// http.Dir(s.imagesDir) points Go to a real directory on the hard drive (e.g., "/var/www/uploads").
+		// http.FileServer() turns that directory into a "File Server" helper (fs).
+		// This helper knows how to read files from that folder and send them to a browser.
+		//
+		// EXAMPLE:
+		// If s.imagesDir is "/var/www/uploads", then `fs` is looking inside "/var/www/uploads/".
+		fs := http.FileServer(http.Dir(s.imagesDir))
+
+		// 2. THE URL ROUTE & CLEANUP (What URL do users type, and how do we find the file?)
+		// We want users to access files via: "http://example.com/images/avatar.png"
+		// But there is a mismatch:
+		//   - The URL has "/images/" in it.
+		//   - The physical folder "/var/www/uploads" does NOT have an "images" subfolder.
+		//
+		// If we didn't use `http.StripPrefix`, Go would look for:
+		//
+		//  "/var/www/uploads/images/avatar.png" -> (404 Not Found!)
+		//
+		// `http.StripPrefix("/images/", fs)` solves this:
+		//  1. User requests: "/images/avatar.png"
+		//  2. StripPrefix cuts off "/images/", leaving: "avatar.png"
+		//  3. The file server (fs) looks for: "/var/www/uploads/avatar.png" -> (200 OK!)
+		r.Handle("/images/*", http.StripPrefix("/images/", fs))
+
+		/*
+			Image Retrieval & Serving Architecture:
+
+			1. Upload & Ingestion:
+			   - Saves binary image file to disk (s.imagesDir) with a timestamped filename.
+			   - Embeds the text description into the vector database linked with metadata (`image_path: /images/<filename>`).
+
+			2. RAG & Prompt Context:
+			   - Matches user query with description vectors in the database.
+			   - Injects the metadata image path into the LLM prompt context.
+
+			3. Generation & Rendering:
+			   - LLM responds with Markdown image syntax: `![alt](/images/<filename>)`.
+			   - Client parses Markdown to HTML `<img>` tag, triggering an HTTP GET to `/images/<filename>`.
+
+			4. File Serving:
+			   - Chi router uses `http.StripPrefix("/images/", http.FileServer(...))` to locate the file on disk and stream bytes back to the browser.
+		*/
+	}
+
 	return r
+}
+
+type uploadImageResponse struct {
+	Source      string `json:"source"`
+	ImagePath   string `json:"image_path"`
+	Description string `json:"description"`
+	Bytes       int    `json:"bytes"`
+	Chunks      int    `json:"chunks"`
+}
+
+func (s *Server) handleUploadImage(w http.ResponseWriter, r *http.Request) {
+	if s.store == nil {
+		http.Error(w, "ingest is not configured (no vector store)", http.StatusServiceUnavailable)
+		return
+	}
+
+	if s.imagesDir == "" {
+		http.Error(w, "image upload not configured", http.StatusServiceUnavailable)
+		return
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, maxUploadBytes)
+	if err := r.ParseMultipartForm(maxUploadBytes); err != nil {
+		http.Error(w, "upload too large or malformed: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	description := strings.TrimSpace(r.FormValue("description"))
+	if description == "" {
+		http.Error(w, "description is required", http.StatusBadRequest)
+		return
+	}
+
+	file, header, err := r.FormFile("image")
+	if err != nil {
+		http.Error(w, "missing 'image' field", http.StatusBadRequest)
+		return
+	}
+	defer file.Close()
+
+	original := filepath.Base(header.Filename)
+	if !ingest.IsImage(original) {
+		http.Error(w, "unsuppored image format (allowed: .png, .jpg, .jpeg, .webp, .gif)", http.StatusUnsupportedMediaType)
+		return
+	}
+
+	content, err := io.ReadAll(file)
+	if err != nil {
+		http.Error(w, "read upload: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// Generate a unique, filesystem-safe filename by prepending a nanosecond timestamp.
+	// This ensures we can store and track every image, even if different users upload
+	// files with the exact same name (e.g., "1711112222333000000-photo.jpg").
+	saved := fmt.Sprintf("%d-%s", time.Now().UnixNano(), safeFileName(original))
+
+	if err := os.MkdirAll(s.imagesDir, 0o755); err != nil {
+		http.Error(w, "mkdir images dir: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Securely construct the destination path (e.g., "./documents/images/1711112222333000000-photo.jpg").
+	dest := filepath.Join(s.imagesDir, saved)
+	if err := os.WriteFile(dest, content, 0o644); err != nil {
+		http.Error(w, "write image: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	chunks, err := ingest.ProcessImage(r.Context(), saved, description, ingest.Options{}, s.embedder, s.store)
+	if err != nil {
+		_ = os.Remove(dest)
+		log.Printf("[web] image ingest failed for %q: %v", saved, err)
+		http.Error(w, "ingest failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(uploadImageResponse{
+		Source:      saved,
+		ImagePath:   ingest.ImagePathPrefix + saved, // (e.g., "/images/1711112222333000000-photo.jpg")
+		Description: description,
+		Bytes:       len(content),
+		Chunks:      chunks,
+	})
+}
+
+func safeFileName(name string) string {
+	var sb strings.Builder
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z',
+			r >= 'A' && r <= 'Z',
+			r >= '0' && r <= '9',
+			r == '.', r == '-', r == '_':
+			sb.WriteRune(r)
+		default:
+			sb.WriteRune('_')
+		}
+	}
+	out := sb.String()
+	if out == "" || out == "." || out == ".." {
+		return "image"
+	}
+	return out
 }
 
 type chatRequest struct {
