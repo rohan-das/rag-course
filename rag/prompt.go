@@ -43,6 +43,16 @@ func formatContext(hits []vector.Result) string {
 			// Fallback for edge cases where vectors are manually inserted without source metadata
 			source = unknownSource
 		}
+
+		// "source": "1784557250401272000-leprauchan.jpg",
+		// "image_path": "/images/1784557250401272000-leprauchan.jpg",
+		if h.Metadata["type"] == "image" && h.Metadata["image_path"] != "" {
+			fmt.Fprintf(&sb, "[%d] Source: %s [image: %s] (similarity %.2f)\n%s\n\n",
+				i+1, source, h.Metadata["image_path"], h.Score, h.Content)
+			continue
+		}
+
+		// "source": "guardian.txt"
 		fmt.Fprintf(&sb, "[%d] Source: %s (similarity %.2f)\n%s\n\n", i+1, source, h.Score, h.Content)
 	}
 	return strings.TrimSpace(sb.String())
