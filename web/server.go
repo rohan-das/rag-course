@@ -60,59 +60,62 @@ func (s *Server) Routes() http.Handler {
 	r := chi.NewRouter()
 	r.Use(middleware.Recoverer)
 	r.Get("/chat", s.handleChatPage)
-	r.Post("/api/chat/stream", s.handleChatStream)
-	r.Post("/api/upload", s.handleUpload)
 
-	if s.imagesDir != "" {
-		r.Post("/api/upload/image", s.handleUploadImage)
+	r.Group(func(r chi.Router) {
+		r.Use(InjectionDefense)
+		r.Post("/api/chat/stream", s.handleChatStream)
+		r.Post("/api/upload", s.handleUpload)
+		if s.imagesDir != "" {
+			r.Post("/api/upload/image", s.handleUploadImage)
+		}
+	})
 
-		// This code tells your router:
-		// "If anyone requests a URL starting with '/images/', look inside './documents/images/' on our disk!"
+	// This code tells your router:
+	// "If anyone requests a URL starting with '/images/', look inside './documents/images/' on our disk!"
 
-		// 1. THE FILE SYSTEM HELPER (Where are the files?)
-		// http.Dir(s.imagesDir) points Go to a real directory on the hard drive (e.g., "/var/www/uploads").
-		// http.FileServer() turns that directory into a "File Server" helper (fs).
-		// This helper knows how to read files from that folder and send them to a browser.
-		//
-		// EXAMPLE:
-		// If s.imagesDir is "/var/www/uploads", then `fs` is looking inside "/var/www/uploads/".
-		fs := http.FileServer(http.Dir(s.imagesDir))
+	// 1. THE FILE SYSTEM HELPER (Where are the files?)
+	// http.Dir(s.imagesDir) points Go to a real directory on the hard drive (e.g., "/var/www/uploads").
+	// http.FileServer() turns that directory into a "File Server" helper (fs).
+	// This helper knows how to read files from that folder and send them to a browser.
+	//
+	// EXAMPLE:
+	// If s.imagesDir is "/var/www/uploads", then `fs` is looking inside "/var/www/uploads/".
+	fs := http.FileServer(http.Dir(s.imagesDir))
 
-		// 2. THE URL ROUTE & CLEANUP (What URL do users type, and how do we find the file?)
-		// We want users to access files via: "http://example.com/images/avatar.png"
-		// But there is a mismatch:
-		//   - The URL has "/images/" in it.
-		//   - The physical folder "/var/www/uploads" does NOT have an "images" subfolder.
-		//
-		// If we didn't use `http.StripPrefix`, Go would look for:
-		//
-		//  "/var/www/uploads/images/avatar.png" -> (404 Not Found!)
-		//
-		// `http.StripPrefix("/images/", fs)` solves this:
-		//  1. User requests: "/images/avatar.png"
-		//  2. StripPrefix cuts off "/images/", leaving: "avatar.png"
-		//  3. The file server (fs) looks for: "/var/www/uploads/avatar.png" -> (200 OK!)
-		r.Handle("/images/*", http.StripPrefix("/images/", fs))
+	// 2. THE URL ROUTE & CLEANUP (What URL do users type, and how do we find the file?)
+	// We want users to access files via: "http://example.com/images/avatar.png"
+	// But there is a mismatch:
+	//   - The URL has "/images/" in it.
+	//   - The physical folder "/var/www/uploads" does NOT have an "images" subfolder.
+	//
+	// If we didn't use `http.StripPrefix`, Go would look for:
+	//
+	//  "/var/www/uploads/images/avatar.png" -> (404 Not Found!)
+	//
+	// `http.StripPrefix("/images", fs)` solves this:
+	//  1. User requests: "/images/avatar.png"
+	//  2. StripPrefix cuts off "/images", leaving: "/avatar.png"
+	//  3. The file server (fs) looks for: "/var/www/uploads/avatar.png" -> (200 OK!)
+	r.Handle("/images/*", http.StripPrefix("/images", fs))
 
-		/*
-			Image Retrieval & Serving Architecture:
+	/*
+		Image Retrieval & Serving Architecture:
 
-			1. Upload & Ingestion:
-			   - Saves binary image file to disk (s.imagesDir) with a timestamped filename.
-			   - Embeds the text description into the vector database linked with metadata (`image_path: /images/<filename>`).
+		1. Upload & Ingestion:
+		   - Saves binary image file to disk (s.imagesDir) with a timestamped filename.
+		   - Embeds the text description into the vector database linked with metadata (`image_path: /images/<filename>`).
 
-			2. RAG & Prompt Context:
-			   - Matches user query with description vectors in the database.
-			   - Injects the metadata image path into the LLM prompt context.
+		2. RAG & Prompt Context:
+		   - Matches user query with description vectors in the database.
+		   - Injects the metadata image path into the LLM prompt context.
 
-			3. Generation & Rendering:
-			   - LLM responds with Markdown image syntax: `![alt](/images/<filename>)`.
-			   - Client parses Markdown to HTML `<img>` tag, triggering an HTTP GET to `/images/<filename>`.
+		3. Generation & Rendering:
+		   - LLM responds with Markdown image syntax: `![alt](/images/<filename>)`.
+		   - Client parses Markdown to HTML `<img>` tag, triggering an HTTP GET to `/images/<filename>`.
 
-			4. File Serving:
-			   - Chi router uses `http.StripPrefix("/images/", http.FileServer(...))` to locate the file on disk and stream bytes back to the browser.
-		*/
-	}
+		4. File Serving:
+		   - Chi router uses `http.StripPrefix("/images", http.FileServer(...))` to locate the file on disk and stream bytes back to the browser.
+	*/
 
 	if s.client.HasVision() {
 		r.Post("/api/caption", s.handleCaption)
@@ -177,6 +180,9 @@ type uploadImageResponse struct {
 	Chunks      int    `json:"chunks"`
 }
 
+// handleUploadImage processes multipart form uploads containing an image file and a description.
+// It saves the file to disk with a timestamped filename, ingests it into the vector database
+// using the provided description, and returns the response metadata as JSON.
 func (s *Server) handleUploadImage(w http.ResponseWriter, r *http.Request) {
 	if s.store == nil {
 		http.Error(w, "ingest is not configured (no vector store)", http.StatusServiceUnavailable)
@@ -188,18 +194,21 @@ func (s *Server) handleUploadImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Limit request body size to prevent memory exhaustion and parse multipart form.
 	r.Body = http.MaxBytesReader(w, r.Body, maxUploadBytes)
 	if err := r.ParseMultipartForm(maxUploadBytes); err != nil {
 		http.Error(w, "upload too large or malformed: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 
+	// Extract and validate the required text description used for vector embedding.
 	description := strings.TrimSpace(r.FormValue("description"))
 	if description == "" {
 		http.Error(w, "description is required", http.StatusBadRequest)
 		return
 	}
 
+	// Retrieve the uploaded image file from the "image" form field.
 	file, header, err := r.FormFile("image")
 	if err != nil {
 		http.Error(w, "missing 'image' field", http.StatusBadRequest)
@@ -207,12 +216,14 @@ func (s *Server) handleUploadImage(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file.Close()
 
+	// Validate file extension against allowed image types.
 	original := filepath.Base(header.Filename)
 	if !ingest.IsImage(original) {
-		http.Error(w, "unsuppored image format (allowed: .png, .jpg, .jpeg, .webp, .gif)", http.StatusUnsupportedMediaType)
+		http.Error(w, "unsupported image format (allowed: .png, .jpg, .jpeg, .webp, .gif)", http.StatusUnsupportedMediaType)
 		return
 	}
 
+	// Read image binary content into memory.
 	content, err := io.ReadAll(file)
 	if err != nil {
 		http.Error(w, "read upload: "+err.Error(), http.StatusBadRequest)
@@ -236,6 +247,8 @@ func (s *Server) handleUploadImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Embed the text description into the vector store linked to the image URL.
+	// Clean up the saved file on disk if ingestion fails.
 	chunks, err := ingest.ProcessImage(r.Context(), saved, description, ingest.Options{}, s.embedder, s.store)
 	if err != nil {
 		_ = os.Remove(dest)
@@ -254,6 +267,8 @@ func (s *Server) handleUploadImage(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// safeFileName cleans a filename by replacing special or dangerous characters with
+// underscores to ensure safe storage on the local filesystem.
 func safeFileName(name string) string {
 	var sb strings.Builder
 	for _, r := range name {
@@ -278,6 +293,9 @@ type chatRequest struct {
 	Messages []llm.Message `json:"messages"`
 }
 
+// handleUpload processes multipart file uploads for general document ingestion.
+// It validates the file format, parses the content into embeddings, stores them
+// in the vector database, and optionally archives the raw document to disk.
 func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	if s.store == nil {
 		http.Error(w, "ingest is not configured (no vector store)", http.StatusServiceUnavailable)
@@ -288,7 +306,7 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	// maxUploadBytes will fail, preventing excessively large uploads.
 	r.Body = http.MaxBytesReader(w, r.Body, maxUploadBytes)
 
-	// multipart/form-data: PDFs, DOCX, Images etc.
+	// multipart/form-data: PDFs, DOCX, TXT, MD, etc.
 	// Parse the multipart/form-data request. Uploaded files larger than
 	// maxUploadBytes or malformed multipart bodies return an error.
 	if err := r.ParseMultipartForm(maxUploadBytes); err != nil {
@@ -346,6 +364,9 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleChatStream manages interactive chat requests by augmenting user input
+// with context retrieved from the vector store and streaming LLM tokens back
+// to the client using Server-Sent Events (SSE).
 func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 	// Streaming responses require the ResponseWriter to implement
 	// http.Flusher. Flush() forces any buffered data to be sent to
@@ -435,6 +456,8 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 	send("done", `""`)
 }
 
+// withInlineContext prepends retrieved RAG context directly onto the content of the
+// most recent user message in the chat history before sending it to the LLM.
 func withInlineContext(history []llm.Message, contextText string) []llm.Message {
 	if len(history) == 0 || contextText == "" {
 		return history
@@ -452,11 +475,12 @@ func withInlineContext(history []llm.Message, contextText string) []llm.Message 
 	return out
 }
 
+// handleChatPage renders the main HTML chat UI template.
 func (s *Server) handleChatPage(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := s.tpl.ExecuteTemplate(w, "chat.gohtml", map[string]any{
-		"Title":         s.title,
-		"CationEnabled": s.client.HasVision(),
+		"Title":          s.title,
+		"CaptionEnabled": s.client.HasVision(),
 	}); err != nil {
 		log.Printf("[web] template error: %v", err)
 	}
@@ -554,6 +578,8 @@ func New(client, embedder *llm.Client, retriever *rag.Retriever, opts Options) (
 	}, nil
 }
 
+// readSystemPrompt reads and trims the system prompt text from a file at the given path.
+// It returns an empty string if the path is empty or if the file does not exist.
 func readSystemPrompt(path string) string {
 	if path == "" {
 		return ""
