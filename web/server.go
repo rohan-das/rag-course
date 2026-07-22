@@ -125,13 +125,16 @@ type captionResponse struct {
 	Description string
 }
 
+// handleCaption processes an uploaded image and returns an AI-generated caption.
 func (s *Server) handleCaption(w http.ResponseWriter, r *http.Request) {
+	// Restrict request body size to prevent memory exhaustion.
 	r.Body = http.MaxBytesReader(w, r.Body, maxUploadBytes)
 	if err := r.ParseMultipartForm(maxUploadBytes); err != nil {
 		http.Error(w, "upload too large or malformed: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 
+	// Extract the uploaded file from the "image" form field.
 	file, header, err := r.FormFile("image")
 	if err != nil {
 		http.Error(w, "missing image field", http.StatusBadRequest)
@@ -139,17 +142,20 @@ func (s *Server) handleCaption(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file.Close()
 
+	// Validate that the file extension is a supported image format.
 	if !ingest.IsImage(filepath.Base(header.Filename)) {
 		http.Error(w, "unsupported image format", http.StatusUnsupportedMediaType)
 		return
 	}
 
+	// Read image binary content into memory.
 	content, err := io.ReadAll(file)
 	if err != nil {
 		http.Error(w, "read upload: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 
+	// Send the image to the vision model client to generate a description.
 	mime := header.Header.Get("Content-Type")
 	desc, err := s.client.DescribeImage(r.Context(), mime, content)
 	if err != nil {
@@ -158,6 +164,7 @@ func (s *Server) handleCaption(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Return the generated description in a JSON response.
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(captionResponse{Description: strings.TrimSpace(desc)})
 }
@@ -281,6 +288,7 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	// maxUploadBytes will fail, preventing excessively large uploads.
 	r.Body = http.MaxBytesReader(w, r.Body, maxUploadBytes)
 
+	// multipart/form-data: PDFs, DOCX, Images etc.
 	// Parse the multipart/form-data request. Uploaded files larger than
 	// maxUploadBytes or malformed multipart bodies return an error.
 	if err := r.ParseMultipartForm(maxUploadBytes); err != nil {
